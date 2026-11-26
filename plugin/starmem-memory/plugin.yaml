@@ -1,0 +1,6 @@
+name: starmem-memory
+version: 0.1.0
+description: "星忆（Starmem）外挂记忆库 provider — 召回注入、镜像脏标记、对话抽取投递"
+requires_env: []
+config_keys:
+  - memory.starmem

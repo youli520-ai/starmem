@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""星忆端到端验收（S3）。在临时库跑完整链路，每步输出实测值；全绿退出码 0。
+
+覆盖：
+  1 新建条目 → facts +1
+  2 改正文   → learned_at 不变（同条更新，不是新建）
+  3 删条目   → facts -1
+  4 软删     → 重索引后仍 deleted（B1 回归）
+  5 单文件重索引 → facts_fts 不累积（B3 回归）
+  6 文件全删 → 归档而非静默跳过（B4 回归）
+
+用法：starmem-e2e [--json]
+"""
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent          # bin/
+LIB = str(_HERE.parent / "lib")
+MEMD = str(_HERE / "memd")
+
+
+def main() -> int:
+    as_json = "--json" in sys.argv
+    T = Path(tempfile.mkdtemp(prefix="starmem-e2e-"))
+    results = []
+    try:
+        mem = T / "memory" / "default"
+        mem.mkdir(parents=True)
+        root = T / "starmem"
+        (root / "data" / "banks").mkdir(parents=True)
+
+        r = subprocess.run([MEMD, "initdb"], env={**os.environ, "MEMD_ROOT": str(root)},
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"initdb 失败：{r.stderr[:200]}", file=sys.stderr)
+            return 70
+
+        sys.path.insert(0, LIB)
+        import indexer
+        indexer.ROOT = root
+        indexer.BANKS_DIR = root / "data" / "banks"
+        indexer.MEMORY_DIR = T / "memory"
+        indexer.BANKS = ("default",)
+        db = root / "data" / "banks" / "default.db"
+
+        def q(sql, args=()):
+            c = sqlite3.connect(db)
+            c.row_factory = sqlite3.Row
+            row = c.execute(sql, args).fetchone()
+            c.close()
+            return row
+
+        def facts():
+            return q("SELECT COUNT(*) n FROM facts")["n"]
+
+        def fts():
+            return q("SELECT COUNT(*) n FROM facts_fts")["n"]
+
+        def add(name, expect, actual, ok):
+            results.append({"step": name, "expect": expect, "actual": actual, "pass": bool(ok)})
+
+        f = mem / "e2e.md"
+
+        # 1 新建条目
+        n0 = facts()
+        f.write_text("## E2E甲\n第一版正文\n", encoding="utf-8")
+        indexer.index_bank("default")
+        n1 = facts()
+        add("1 新建条目 → facts +1", f"{n0}→{n0 + 1}", f"{n0}→{n1}", n1 == n0 + 1)
+        learned_a = q("SELECT learned_at FROM facts WHERE subject='E2E甲'")["learned_at"]
+
+        # 2 改正文（learned_at 必须保留）
+        time.sleep(1.1)
+        f.write_text("## E2E甲\n第二版正文（已修改）\n", encoding="utf-8")
+        indexer.index_bank("default")
+        row = q("SELECT learned_at,hash FROM facts WHERE subject='E2E甲'")
+        add("2 改正文 → learned_at 不变", f"learned_at={learned_a}",
+            f"learned_at={row['learned_at']}", row["learned_at"] == learned_a)
+
+        # 3 删条目（文件变空）
+        f.write_text("", encoding="utf-8")
+        indexer.index_bank("default")
+        n3 = facts()
+        gone = q("SELECT COUNT(*) n FROM facts WHERE subject='E2E甲'")["n"] == 0
+        add("3 删条目 → facts -1 且条目消失", f"{n1}→{n1 - 1}, 甲=0",
+            f"{n1}→{n3}, 甲={0 if gone else 1}", (n3 == n1 - 1) and gone)
+
+        # 4 软删后重索引不复活（B1）
+        f.write_text("## E2E丙\n待软删\n", encoding="utf-8")
+        indexer.index_bank("default")
+        c = sqlite3.connect(db)
+        c.execute("UPDATE facts SET status='deleted', recallable=0, deleted_at='2026-01-01T00:00:00+08:00' "
+                  "WHERE subject='E2E丙'")
+        c.commit(); c.close()
+        indexer.index_bank("default")
+        row = q("SELECT status,recallable FROM facts WHERE subject='E2E丙'")
+        add("4 软删 → 重索引后仍 deleted", "deleted/0",
+            f"{row['status']}/{row['recallable']}",
+            row["status"] == "deleted" and row["recallable"] == 0)
+
+        # 5 单文件重索引 FTS 不累积（B3）
+        fts_before = fts()
+        conn = indexer.connect("default")
+        for i in range(2):
+            f.write_text(f"## E2E丙\n待软删 v{i}\n", encoding="utf-8")
+            indexer.index_file(conn, "default", f, f"e2e-{i}")
+            conn.commit()
+        conn.close()
+        fts_after = fts()
+        add("5 单文件重索引 → fts 不累积", f"fts={fts_before}",
+            f"fts={fts_after}", fts_after == fts_before)
+
+        # 6 文件全删 → 归档（B4）
+        f.unlink()
+        out = indexer.index_bank("default")
+        st = q("SELECT COUNT(*) n FROM facts WHERE status='archived'")["n"]
+        add("6 删光文件 → 归档留证", "archived>0 且 documents=0",
+            f"archived={st}, documents={out.get('documents')}, fts={fts()}",
+            st > 0 and out.get("documents") == 0)
+
+    finally:
+        shutil.rmtree(T, ignore_errors=True)
+
+    passed = sum(1 for x in results if x["pass"])
+    if as_json:
+        print(json.dumps({"passed": passed, "total": len(results), "results": results},
+                         ensure_ascii=False, indent=1))
+    else:
+        print("星忆端到端验收")
+        for x in results:
+            mark = "PASS" if x["pass"] else "FAIL"
+            print(f"  [{mark}] {x['step']}")
+            print(f"         期望 {x['expect']} ｜ 实测 {x['actual']}")
+        print(f"\n{'✅ 全部通过' if passed == len(results) else '❌ 有失败项'}：{passed}/{len(results)}")
+    return 0 if passed == len(results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

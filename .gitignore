@@ -1,0 +1,16 @@
+# 数据与派生（不入库）
+data/
+models/
+memory/
+*.db
+*.db-wal
+*.db-shm
+*.npz
+*.pkl
+tmp/
+logs/
+__pycache__/
+*.pyc
+
+# 本机运行时
+*.bak-*
