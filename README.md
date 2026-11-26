@@ -142,6 +142,15 @@ sqlite3 data/banks/default.db 'PRAGMA integrity_check'
 - **单写者**：多个 memd 同时写同一 bank 会争 SQLite 写锁，务必只跑一个实例。
 - **`memory/` 下非 bank 目录**（如 `sessions/`、`benchmarks/`）会被 INDEX 收录，但不会被 L1 索引。
 
+## 第三方组件
+
+| 组件 | 用途 | 许可 | 是否随包分发 |
+|---|---|---|---|
+| BAAI/bge-small-zh-v1.5（Qdrant 打包） | 向量召回 | MIT | 仅 full 包含权重 |
+| fastembed / onnxruntime | 向量推理运行时（可选） | Apache-2.0 / MIT | 否，用户自行 `pip install` |
+
+不使用向量能力时可完全忽略这些依赖，系统自动降级为纯 BM25。
+
 ## 许可
 
 MIT，见 `LICENSE`。
